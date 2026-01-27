@@ -1,0 +1,24 @@
+# Rust/Cargo artifacts
+target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# WASM build artifacts
+*.wasm
+*.wasm.old
+
+# Soroban artifacts
+.soroban/
+*.soroban
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
