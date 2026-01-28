@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, vec, Address, Env, Map,
-    Symbol, Vec,
+    String, Symbol, Vec,
 };
 
 /// Error types for blood registration
@@ -14,6 +14,9 @@ pub enum Error {
     InvalidExpiration = 3,
     DuplicateRegistration = 4,
     StorageError = 5,
+    InvalidRequiredBy = 6,
+    DuplicateRequest = 7,
+    InvalidDeliveryAddress = 8,
 }
 
 /// Blood type enumeration
@@ -30,6 +33,15 @@ pub enum BloodType {
     ONegative,
 }
 
+/// Urgency level for blood requests
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UrgencyLevel {
+    Routine,
+    Urgent,
+    Critical,
+}
+
 /// Blood unit inventory record
 #[contracttype]
 #[derive(Clone)]
@@ -42,6 +54,32 @@ pub struct BloodUnit {
     pub location: Symbol,
     pub bank_id: Address,
     pub registration_timestamp: u64,
+}
+
+/// Blood request record
+#[contracttype]
+#[derive(Clone)]
+pub struct BloodRequest {
+    pub id: u64,
+    pub hospital_id: Address,
+    pub blood_type: BloodType,
+    pub quantity_ml: u32,
+    pub urgency: UrgencyLevel,
+    pub required_by: u64,
+    pub delivery_address: String,
+    pub created_at: u64,
+}
+
+/// Key for detecting duplicate requests
+#[contracttype]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RequestKey {
+    pub hospital_id: Address,
+    pub blood_type: BloodType,
+    pub quantity_ml: u32,
+    pub urgency: UrgencyLevel,
+    pub required_by: u64,
+    pub delivery_address: String,
 }
 
 /// Event data for blood registration
@@ -57,17 +95,37 @@ pub struct BloodRegisteredEvent {
     pub registration_timestamp: u64,
 }
 
+/// Event data for blood request creation
+#[contracttype]
+#[derive(Clone)]
+pub struct RequestCreatedEvent {
+    pub request_id: u64,
+    pub hospital_id: Address,
+    pub blood_type: BloodType,
+    pub quantity_ml: u32,
+    pub urgency: UrgencyLevel,
+    pub required_by: u64,
+    pub delivery_address: String,
+    pub created_at: u64,
+}
+
 /// Storage keys
 const BLOOD_UNITS: Symbol = symbol_short!("UNITS");
 const NEXT_ID: Symbol = symbol_short!("NEXT_ID");
 const BLOOD_BANKS: Symbol = symbol_short!("BANKS");
 const ADMIN: Symbol = symbol_short!("ADMIN");
+const HOSPITALS: Symbol = symbol_short!("HOSPITALS");
+const REQUESTS: Symbol = symbol_short!("REQUESTS");
+const NEXT_REQUEST_ID: Symbol = symbol_short!("NEXT_REQ");
+const REQUEST_KEYS: Symbol = symbol_short!("REQ_KEYS");
 
 // Validation constants
 const MIN_QUANTITY_ML: u32 = 50; // Minimum 50ml
 const MAX_QUANTITY_ML: u32 = 500; // Maximum 500ml per unit
 const MIN_SHELF_LIFE_DAYS: u64 = 1; // At least 1 day shelf life
 const MAX_SHELF_LIFE_DAYS: u64 = 42; // Maximum 42 days for whole blood
+const MIN_REQUEST_ML: u32 = 50; // Minimum request amount
+const MAX_REQUEST_ML: u32 = 5000; // Maximum request amount
 
 #[contract]
 pub struct HealthChainContract;
@@ -98,6 +156,27 @@ impl HealthChainContract {
 
         banks.set(bank_id.clone(), true);
         env.storage().persistent().set(&BLOOD_BANKS, &banks);
+
+        Ok(())
+    }
+
+    /// Register a hospital (admin only)
+    pub fn register_hospital(env: Env, hospital_id: Address) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(Error::Unauthorized)?;
+        admin.require_auth();
+
+        let mut hospitals: Map<Address, bool> = env
+            .storage()
+            .persistent()
+            .get(&HOSPITALS)
+            .unwrap_or(Map::new(&env));
+
+        hospitals.set(hospital_id.clone(), true);
+        env.storage().persistent().set(&HOSPITALS, &hospitals);
 
         Ok(())
     }
@@ -194,6 +273,113 @@ impl HealthChainContract {
             .unwrap_or(Map::new(&env));
 
         banks.get(bank_id).unwrap_or(false)
+    }
+
+    /// Check if an address is an authorized hospital
+    pub fn is_hospital(env: Env, hospital_id: Address) -> bool {
+        let hospitals: Map<Address, bool> = env
+            .storage()
+            .persistent()
+            .get(&HOSPITALS)
+            .unwrap_or(Map::new(&env));
+
+        hospitals.get(hospital_id).unwrap_or(false)
+    }
+
+    /// Create a blood request (hospital only)
+    pub fn create_request(
+        env: Env,
+        hospital_id: Address,
+        blood_type: BloodType,
+        quantity_ml: u32,
+        urgency: UrgencyLevel,
+        required_by: u64,
+        delivery_address: String,
+    ) -> Result<u64, Error> {
+        hospital_id.require_auth();
+
+        let hospitals: Map<Address, bool> = env
+            .storage()
+            .persistent()
+            .get(&HOSPITALS)
+            .unwrap_or(Map::new(&env));
+
+        if !hospitals.get(hospital_id.clone()).unwrap_or(false) {
+            return Err(Error::Unauthorized);
+        }
+
+        if !(MIN_REQUEST_ML..=MAX_REQUEST_ML).contains(&quantity_ml) {
+            return Err(Error::InvalidQuantity);
+        }
+
+        if delivery_address.len() == 0 {
+            return Err(Error::InvalidDeliveryAddress);
+        }
+
+        let current_time = env.ledger().timestamp();
+        if required_by <= current_time {
+            return Err(Error::InvalidRequiredBy);
+        }
+
+        let request_key = RequestKey {
+            hospital_id: hospital_id.clone(),
+            blood_type,
+            quantity_ml,
+            urgency,
+            required_by,
+            delivery_address: delivery_address.clone(),
+        };
+
+        let mut request_keys: Map<RequestKey, u64> = env
+            .storage()
+            .persistent()
+            .get(&REQUEST_KEYS)
+            .unwrap_or(Map::new(&env));
+
+        if request_keys.get(request_key.clone()).is_some() {
+            return Err(Error::DuplicateRequest);
+        }
+
+        let request_id = Self::get_next_request_id(&env);
+
+        let request = BloodRequest {
+            id: request_id,
+            hospital_id: hospital_id.clone(),
+            blood_type,
+            quantity_ml,
+            urgency,
+            required_by,
+            delivery_address: delivery_address.clone(),
+            created_at: current_time,
+        };
+
+        let mut requests: Map<u64, BloodRequest> = env
+            .storage()
+            .persistent()
+            .get(&REQUESTS)
+            .unwrap_or(Map::new(&env));
+
+        requests.set(request_id, request);
+        env.storage().persistent().set(&REQUESTS, &requests);
+
+        request_keys.set(request_key, request_id);
+        env.storage().persistent().set(&REQUEST_KEYS, &request_keys);
+
+        let event = RequestCreatedEvent {
+            request_id,
+            hospital_id,
+            blood_type,
+            quantity_ml,
+            urgency,
+            required_by,
+            delivery_address,
+            created_at: current_time,
+        };
+
+        env.events()
+            .publish((symbol_short!("request"), symbol_short!("create")), event);
+
+        Ok(request_id)
     }
 
     /// Store a health record hash
@@ -338,14 +524,31 @@ impl HealthChainContract {
         env.storage().persistent().set(&NEXT_ID, &(id + 1));
         id
     }
+
+    /// Helper function to get next request ID
+    fn get_next_request_id(env: &Env) -> u64 {
+        let id: u64 = env
+            .storage()
+            .persistent()
+            .get(&NEXT_REQUEST_ID)
+            .unwrap_or(1);
+
+        env.storage().persistent().set(&NEXT_REQUEST_ID, &(id + 1));
+        id
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env};
+    use soroban_sdk::{
+        symbol_short, testutils::Address as _, testutils::Events, Address, Env, String, Symbol,
+        TryFromVal,
+    };
 
-    fn setup_contract_with_admin(env: &Env) -> (Address, Address, HealthChainContractClient) {
+    fn setup_contract_with_admin<'a>(
+        env: &'a Env,
+    ) -> (Address, Address, HealthChainContractClient<'a>) {
         let admin = Address::generate(env);
         let contract_id = env.register(HealthChainContract, ());
         let client = HealthChainContractClient::new(env, &contract_id);
@@ -354,6 +557,20 @@ mod test {
         client.initialize(&admin);
 
         (contract_id, admin, client)
+    }
+
+    fn setup_contract_with_hospital<'a>(
+        env: &'a Env,
+    ) -> (Address, Address, Address, HealthChainContractClient<'a>) {
+        let (contract_id, admin, client) = setup_contract_with_admin(env);
+        let hospital = Address::generate(env);
+
+        env.mock_all_auths();
+        client.register_hospital(&hospital);
+
+        env.mock_all_auths();
+
+        (contract_id, admin, hospital, client)
     }
 
     #[test]
@@ -379,6 +596,18 @@ mod test {
 
         // Verify bank is registered
         assert_eq!(client.is_blood_bank(&bank), true);
+    }
+
+    #[test]
+    fn test_register_hospital() {
+        let env = Env::default();
+        let (_, _, client) = setup_contract_with_admin(&env);
+        let hospital = Address::generate(&env);
+
+        env.mock_all_auths();
+        client.register_hospital(&hospital);
+
+        assert_eq!(client.is_hospital(&hospital), true);
     }
 
     #[test]
@@ -479,7 +708,6 @@ mod test {
         env.mock_all_auths();
         client.register_blood_bank(&bank);
 
-        let current_time = env.ledger().timestamp();
         let expiration = 0; // Already expired
 
         client.register_blood(
@@ -1060,5 +1288,202 @@ mod test {
         // Check without adding any units
         let available = client.check_availability(&BloodType::OPositive, &1);
         assert_eq!(available, false);
+    }
+
+    #[test]
+    fn test_create_request_success() {
+        let env = Env::default();
+        let (_, _, hospital, client) = setup_contract_with_hospital(&env);
+
+        env.mock_all_auths();
+        let current_time = env.ledger().timestamp();
+        let required_by = current_time + 3600;
+
+        let request_id = client.create_request(
+            &hospital,
+            &BloodType::APositive,
+            &500,
+            &UrgencyLevel::Urgent,
+            &required_by,
+            &String::from_str(&env, "Ward A, City Hospital"),
+        );
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+
+        assert_eq!(request_id, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #1)")]
+    fn test_create_request_unauthorized_hospital() {
+        let env = Env::default();
+        let (_, _, client) = setup_contract_with_admin(&env);
+        let hospital = Address::generate(&env);
+
+        env.mock_all_auths();
+        let current_time = env.ledger().timestamp();
+        let required_by = current_time + 3600;
+
+        client.create_request(
+            &hospital,
+            &BloodType::ONegative,
+            &600,
+            &UrgencyLevel::Critical,
+            &required_by,
+            &String::from_str(&env, "ER"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #2)")]
+    fn test_create_request_invalid_quantity_low() {
+        let env = Env::default();
+        let (_, _, hospital, client) = setup_contract_with_hospital(&env);
+
+        env.mock_all_auths();
+        let current_time = env.ledger().timestamp();
+        let required_by = current_time + 3600;
+
+        client.create_request(
+            &hospital,
+            &BloodType::OPositive,
+            &10,
+            &UrgencyLevel::Routine,
+            &required_by,
+            &String::from_str(&env, "Ward B"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #2)")]
+    fn test_create_request_invalid_quantity_high() {
+        let env = Env::default();
+        let (_, _, hospital, client) = setup_contract_with_hospital(&env);
+
+        env.mock_all_auths();
+        let current_time = env.ledger().timestamp();
+        let required_by = current_time + 3600;
+
+        client.create_request(
+            &hospital,
+            &BloodType::BPositive,
+            &6000,
+            &UrgencyLevel::Routine,
+            &required_by,
+            &String::from_str(&env, "Ward B"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn test_create_request_required_by_in_past() {
+        let env = Env::default();
+        let (_, _, hospital, client) = setup_contract_with_hospital(&env);
+
+        env.mock_all_auths();
+        let current_time = env.ledger().timestamp();
+        let required_by = current_time;
+
+        client.create_request(
+            &hospital,
+            &BloodType::ABPositive,
+            &200,
+            &UrgencyLevel::Urgent,
+            &required_by,
+            &String::from_str(&env, "Ward C"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #8)")]
+    fn test_create_request_empty_delivery_address() {
+        let env = Env::default();
+        let (_, _, hospital, client) = setup_contract_with_hospital(&env);
+
+        env.mock_all_auths();
+        let current_time = env.ledger().timestamp();
+        let required_by = current_time + 3600;
+
+        client.create_request(
+            &hospital,
+            &BloodType::ABNegative,
+            &200,
+            &UrgencyLevel::Urgent,
+            &required_by,
+            &String::from_str(&env, ""),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #7)")]
+    fn test_create_request_duplicate_request() {
+        let env = Env::default();
+        let (_, _, hospital, client) = setup_contract_with_hospital(&env);
+
+        env.mock_all_auths();
+        let current_time = env.ledger().timestamp();
+        let required_by = current_time + 7200;
+        let address = String::from_str(&env, "Ward D");
+
+        client.create_request(
+            &hospital,
+            &BloodType::OPositive,
+            &350,
+            &UrgencyLevel::Urgent,
+            &required_by,
+            &address,
+        );
+
+        client.create_request(
+            &hospital,
+            &BloodType::OPositive,
+            &350,
+            &UrgencyLevel::Urgent,
+            &required_by,
+            &address,
+        );
+    }
+
+    #[test]
+    fn test_create_request_event_payload() {
+        let env = Env::default();
+        let (contract_id, _, hospital, client) = setup_contract_with_hospital(&env);
+
+        env.mock_all_auths();
+        let current_time = env.ledger().timestamp();
+        let required_by = current_time + 7200;
+        let delivery_address = String::from_str(&env, "Ward E, General Hospital");
+
+        let request_id = client.create_request(
+            &hospital,
+            &BloodType::ONegative,
+            &450,
+            &UrgencyLevel::Critical,
+            &required_by,
+            &delivery_address,
+        );
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+
+        let (event_contract_id, topics, data) = events.get(0).unwrap();
+        assert_eq!(event_contract_id, contract_id);
+        assert_eq!(topics.len(), 2);
+
+        let topic0: Symbol = TryFromVal::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+        let topic1: Symbol = TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+        assert_eq!(topic0, symbol_short!("request"));
+        assert_eq!(topic1, symbol_short!("create"));
+
+        let event: RequestCreatedEvent = TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(event.request_id, request_id);
+        assert_eq!(event.hospital_id, hospital);
+        assert!(event.blood_type == BloodType::ONegative);
+        assert_eq!(event.quantity_ml, 450);
+        assert!(event.urgency == UrgencyLevel::Critical);
+        assert_eq!(event.required_by, required_by);
+        assert_eq!(event.delivery_address, delivery_address);
+        assert_eq!(event.created_at, current_time);
     }
 }
