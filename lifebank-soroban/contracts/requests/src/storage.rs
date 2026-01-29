@@ -16,6 +16,10 @@ pub const MIN_REQUEST_WINDOW_SECONDS: u64 = 3600;
 ///
 /// # Panics
 /// Panics if admin has not been set (contract not initialized)
+use crate::types::{BloodRequest, DataKey};
+use soroban_sdk::{Address, Env, Vec};
+
+/// Get the admin address
 pub fn get_admin(env: &Env) -> Address {
     env.storage()
         .instance()
@@ -67,6 +71,7 @@ pub fn revoke_hospital(env: &Env, hospital: &Address) {
 // ========== Request ID Generation ==========
 
 /// Get the current request counter value
+/// Get the current request counter
 pub fn get_request_counter(env: &Env) -> u64 {
     env.storage()
         .instance()
@@ -237,4 +242,21 @@ pub fn get_requests_by_urgency(env: &Env, urgency: UrgencyLevel) -> Vec<u64> {
         .persistent()
         .get(&key)
         .unwrap_or(Vec::new(env))
+/// Retrieve a blood request by ID
+pub fn get_blood_request(env: &Env, request_id: u64) -> Option<BloodRequest> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::BloodRequest(request_id))
+}
+
+/// Check if a hospital is authorized
+pub fn is_authorized_hospital(env: &Env, hospital: &Address) -> bool {
+    let admin = get_admin(env);
+    hospital == &admin
+}
+
+/// Check if a blood bank is authorized
+pub fn is_authorized_blood_bank(env: &Env, bank: &Address) -> bool {
+    let admin = get_admin(env);
+    bank == &admin
 }

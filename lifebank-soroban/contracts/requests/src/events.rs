@@ -14,6 +14,42 @@ use soroban_sdk::{Address, Env, Symbol, Vec};
 /// * `quantity_ml` - Quantity requested in milliliters
 /// * `urgency` - Urgency level of the request
 /// * `required_by` - Timestamp when blood is required
+use crate::types::{BloodType, RequestStatus, UrgencyLevel};
+use soroban_sdk::{Address, Env, Symbol};
+
+/// Event emitted when a blood request is created
+#[soroban_sdk::contracttype]
+#[derive(Clone)]
+pub struct RequestCreatedEvent {
+    pub request_id: u64,
+    pub hospital_id: Address,
+    pub blood_type: BloodType,
+    pub quantity_ml: u32,
+    pub urgency: UrgencyLevel,
+    pub required_by: u64,
+    pub created_at: u64,
+}
+
+/// Event emitted when a request status changes
+#[soroban_sdk::contracttype]
+#[derive(Clone)]
+pub struct RequestStatusChangedEvent {
+    pub request_id: u64,
+    pub old_status: RequestStatus,
+    pub new_status: RequestStatus,
+    pub changed_at: u64,
+}
+
+/// Event emitted when blood units are assigned to a request
+#[soroban_sdk::contracttype]
+#[derive(Clone)]
+pub struct UnitsAssignedEvent {
+    pub request_id: u64,
+    pub assigned_units: soroban_sdk::Vec<u64>,
+    pub assigned_at: u64,
+}
+
+/// Emit a RequestCreated event
 pub fn emit_request_created(
     env: &Env,
     request_id: u64,
@@ -47,6 +83,8 @@ pub fn emit_request_created(
 /// * `old_status` - Previous status
 /// * `new_status` - New status
 pub fn emit_status_changed(
+/// Emit a RequestStatusChanged event
+pub fn emit_request_status_changed(
     env: &Env,
     request_id: u64,
     old_status: RequestStatus,
@@ -78,6 +116,14 @@ pub fn emit_units_assigned(
     request_id: u64,
     unit_ids: Vec<u64>,
     total_quantity_ml: u32,
+        .publish((Symbol::new(env, "request_status_changed"),), event);
+}
+
+/// Emit an UnitsAssigned event
+pub fn emit_units_assigned(
+    env: &Env,
+    request_id: u64,
+    assigned_units: soroban_sdk::Vec<u64>,
 ) {
     let assigned_at = env.ledger().timestamp();
 
@@ -85,6 +131,7 @@ pub fn emit_units_assigned(
         request_id,
         unit_ids,
         total_quantity_ml,
+        assigned_units,
         assigned_at,
     };
 
